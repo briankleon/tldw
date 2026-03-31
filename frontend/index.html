@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>TL;DW — See the video without watching it</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Instrument+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- LANDING -->
+  <div id="landing">
+    <div class="noise"></div>
+    <nav>
+      <div class="wordmark">TL;DW</div>
+      <div class="nav-tag">See the video without watching it</div>
+    </nav>
+
+    <div class="hero">
+      <div class="hero-eyebrow">YouTube → Visual Summary</div>
+      <h1>Stop watching.<br/><span class="accent">Start seeing.</span></h1>
+      <p class="hero-sub">Paste any YouTube URL and get an instant visual summary — hierarchy, timeline, concept map, comparison, or key stats. AI picks the best format for the content.</p>
+
+      <div class="url-input-wrap">
+        <div class="url-prefix">youtube.com/</div>
+        <input
+          id="urlInput"
+          type="text"
+          placeholder="paste your URL here..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="goBtn" onclick="handleSubmit()">
+          <span>Summarise</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+
+      <div class="example-links">
+        <span>Try:</span>
+        <button class="ex-link" onclick="tryExample('https://www.youtube.com/shorts/cfHp0vvT0YM')">4 Levels of Data Scientist</button>
+        <button class="ex-link" onclick="tryExample('https://www.youtube.com/watch?v=qw4PrtyvJI0')">How to Learn Python</button>
+      </div>
+    </div>
+
+    <div class="visual-types">
+      <div class="vt-item"><span class="vt-icon">▲</span><span>Hierarchy</span></div>
+      <div class="vt-item"><span class="vt-icon">→</span><span>Timeline</span></div>
+      <div class="vt-item"><span class="vt-icon">◉</span><span>Concept Graph</span></div>
+      <div class="vt-item"><span class="vt-icon">⊞</span><span>Comparison</span></div>
+      <div class="vt-item"><span class="vt-icon">⊡</span><span>Stat Cards</span></div>
+    </div>
+  </div>
+
+  <!-- LOADING -->
+  <div id="loading" class="hidden">
+    <div class="noise"></div>
+    <div class="loading-content">
+      <div class="loading-wordmark">TL;DW</div>
+      <div class="loading-steps">
+        <div class="ls" id="ls1">① Fetching transcript...</div>
+        <div class="ls dim" id="ls2">② Reading the content...</div>
+        <div class="ls dim" id="ls3">③ Building your visual...</div>
+      </div>
+      <div class="loading-bar-wrap">
+        <div class="loading-bar-fill" id="loadingBar"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULT -->
+  <div id="result" class="hidden">
+    <div class="noise"></div>
+    <header class="result-header">
+      <button class="back-btn" onclick="goHome()">← New URL</button>
+      <div class="wordmark-sm">TL;DW</div>
+      <div class="visual-type-badge" id="vtBadge"></div>
+    </header>
+
+    <div class="result-body">
+      <!-- Left: video thumb + TLDR -->
+      <div class="result-left">
+        <div class="thumb-wrap">
+          <img id="videoThumb" src="" alt="Video thumbnail"/>
+          <div class="thumb-overlay">
+            <a id="videoLink" href="" target="_blank" rel="noopener">Watch on YouTube ↗</a>
+          </div>
+        </div>
+        <div class="tldr-card">
+          <div class="tldr-label">TL;DW</div>
+          <h2 id="videoTitle"></h2>
+          <p id="tldrText"></p>
+          <div class="visual-reason" id="visualReason"></div>
+        </div>
+      </div>
+
+      <!-- Right: visual -->
+      <div class="result-right">
+        <div id="visualContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ERROR TOAST -->
+  <div id="errorToast" class="hidden">
+    <span id="errorMsg"></span>
+    <button onclick="dismissError()">✕</button>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/visuals.js"></script>
+</body>
+</html>

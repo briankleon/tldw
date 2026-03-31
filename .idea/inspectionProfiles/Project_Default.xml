@@ -1,0 +1,28 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="fastapi" />
+          <option value="uvicorn" />
+          <option value="pydantic" />
+          <option value="pymilvus" />
+          <option value="grpcio" />
+          <option value="python-dotenv" />
+          <option value="httpx" />
+          <option value="jinja2" />
+          <option value="python-multipart" />
+          <option value="mmh3" />
+          <option value="yt-dlp" />
+          <option value="langchain-core" />
+          <option value="langchain-community" />
+          <option value="langchain-openai" />
+          <option value="langgraph" />
+          <option value="openai" />
+          <option value="rich" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
