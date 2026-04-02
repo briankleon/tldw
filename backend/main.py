@@ -3,13 +3,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
 import os
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
 
@@ -28,10 +28,10 @@ app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable not set. Copy .env.example to .env and add your key.")
+    raise ValueError("GEMINI_API_KEY environment variable not set.")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 
 # ── Models ───────────────────────────────────────────────────────────
 class SummariseRequest(BaseModel):
@@ -53,19 +53,6 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID from URL")
 
 
-def get_transcript(video_id: str) -> str:
-    """Fetch transcript using youtube-transcript-api."""
-    try:
-        ytt = YouTubeTranscriptApi()
-        fetched = ytt.fetch(video_id)
-        return " ".join(chunk.text for chunk in fetched)
-    except Exception as e:
-        raise HTTPException(
-            status_code=422,
-            detail=f"No transcript available for this video. It may be private, a music video, or have captions disabled. ({str(e)})"
-        )
-
-
 def clean_json(text: str) -> str:
     """Strip markdown fences from Gemini response."""
     text = text.strip()
@@ -82,29 +69,26 @@ def clean_json(text: str) -> str:
 async def root():
     return FileResponse(str(Path(__file__).parent.parent / "frontend" / "index.html"))
 
+
 @app.post("/api/summarise")
 async def summarise(request: SummariseRequest):
     # 1. Extract video ID
     try:
         video_id = extract_video_id(request.url)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL. Please paste a valid YouTube or YouTube Shorts link.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid YouTube URL. Please paste a valid YouTube or YouTube Shorts link."
+        )
 
-    # 2. Get transcript
-    transcript = get_transcript(video_id)
+    # 2. Build YouTube URL in standard format (works for both regular and Shorts)
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # Truncate if very long (Gemini flash has large context but let's be safe)
-    if len(transcript) > 12000:
-        transcript = transcript[:12000] + "... [truncated]"
-
-    # 3. Ask Gemini to analyse content and choose the best visual type
-    prompt = f"""
+    # 3. Build prompt
+    prompt = """
 You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
-Here is the transcript of a YouTube video:
----
-{transcript}
----
+Watch this video and understand what it is really about.
 
 Your job:
 1. Understand what this video is really about
@@ -119,66 +103,75 @@ Your job:
 
 Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
 
-{{
+{
   "video_title": "inferred title or topic of the video",
   "tldr": "2-3 sentence summary of what this video is about and its key insight",
   "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
   "visual_reason": "one sentence explaining why you chose this visual type",
-  "content": {{ ... }}
-}}
+  "content": { ... }
+}
 
 The "content" field structure depends on visual_type:
 
 For "hierarchy":
-{{
+{
   "title": "The X Levels of ...",
   "levels": [
-    {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}}
+    {"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}
   ]
-}}
+}
 
 For "timeline":
-{{
+{
   "title": "How to ...",
   "steps": [
-    {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}}
+    {"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}
   ]
-}}
+}
 
 For "graph":
-{{
+{
   "title": "The ... Framework",
   "nodes": [
-    {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}}
+    {"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}
   ],
   "edges": [
-    {{"source": "id1", "target": "id2", "label": "relationship"}}
+    {"source": "id1", "target": "id2", "label": "relationship"}
   ]
-}}
+}
 
 For "comparison":
-{{
+{
   "title": "X vs Y",
   "items": ["Option A", "Option B"],
   "dimensions": [
-    {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}}
+    {"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}
   ],
   "verdict": "overall recommendation or conclusion"
-}}
+}
 
 For "stat_cards":
-{{
+{
   "title": "Key Takeaways",
   "cards": [
-    {{"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}}
+    {"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}
   ]
-}}
+}
 
 Be accurate to the video content. Extract real insights, not generic summaries.
 """
 
+    # 4. Call Gemini with native YouTube URL
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=types.Content(
+                parts=[
+                    types.Part(file_data=types.FileData(file_uri=youtube_url)),
+                    types.Part(text=prompt)
+                ]
+            )
+        )
         text = clean_json(response.text)
         data = json.loads(text)
         data["video_id"] = video_id
@@ -191,7 +184,4 @@ Be accurate to the video content. Extract real insights, not generic summaries.
 
 if __name__ == "__main__":
     import uvicorn
-    # Load .env if present
-    from dotenv import load_dotenv
-    load_dotenv()
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
