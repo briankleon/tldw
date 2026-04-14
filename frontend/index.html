@@ -81,25 +81,64 @@
     </header>
 
     <div class="result-body">
-      <!-- Left: video thumb + TLDR -->
+      <!-- Left: video thumb + TLDR + Chat -->
       <div class="result-left">
-        <div class="thumb-wrap">
-          <img id="videoThumb" src="" alt="Video thumbnail"/>
-          <div class="thumb-overlay">
-            <a id="videoLink" href="" target="_blank" rel="noopener">Watch on YouTube ↗</a>
+        <!-- Scrollable summary zone: thumbnail + TLDR scroll freely above the pinned chat -->
+        <div class="left-scroll-area">
+          <div class="thumb-wrap">
+            <img id="videoThumb" src="" alt="Video thumbnail"/>
+            <div class="thumb-overlay">
+              <a id="videoLink" href="" target="_blank" rel="noopener">Watch on YouTube ↗</a>
+            </div>
+          </div>
+          <div class="tldr-card">
+            <div class="tldr-label">TL;DW</div>
+            <h2 id="videoTitle"></h2>
+            <p id="tldrText"></p>
+            <div class="visual-reason" id="visualReason"></div>
           </div>
         </div>
-        <div class="tldr-card">
-          <div class="tldr-label">TL;DW</div>
-          <h2 id="videoTitle"></h2>
-          <p id="tldrText"></p>
-          <div class="visual-reason" id="visualReason"></div>
+
+        <!-- Chat Section: fixed height, always pinned to the bottom of the left panel -->
+        <div id="chatSection" class="chat-section">
+          <div class="chat-header">
+            <div class="chat-title">Ask Questions</div>
+            <div id="chatStatus" class="chat-status">Preparing Q&A...</div>
+          </div>
+          <div id="chatMessages" class="chat-messages">
+            <div class="chat-welcome">
+              <span class="chat-welcome-icon">💬</span>
+              <p>Ask anything about this video — I've read the full transcript.</p>
+            </div>
+          </div>
+          <div class="chat-input-wrap">
+            <input
+              id="chatInput"
+              type="text"
+              placeholder="Ask a question about this video..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button id="chatSendBtn" onclick="sendChatMessage()">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M2 10l16-8-8 16-2-8-6-2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
-      <!-- Right: visual -->
+      <!-- Right: visual + Go Deeper -->
       <div class="result-right">
-        <div id="visualContainer"></div>
+        <div class="result-right-inner">
+          <div id="visualContainer"></div>
+
+          <!-- Go Deeper Section: hidden by default, shown by JS only when results arrive -->
+          <div id="goDeeperSection" class="go-deeper-section" style="display:none">
+            <div class="go-deeper-header">Go Deeper ✦</div>
+            <div id="goDeeperContent" class="go-deeper-content"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

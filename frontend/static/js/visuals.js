@@ -134,9 +134,7 @@ function renderComparison(content, container) {
   const items = content.items || ['Option A', 'Option B'];
   const dimensions = content.dimensions || [];
 
-  const wrap = document.createElement('div');
-  wrap.className = 'comparison-wrap';
-
+  // Title — outside the bordered table, consistent with other visual types
   const title = document.createElement('div');
   title.style.cssText = `
     font-family: var(--font-display);
@@ -146,16 +144,25 @@ function renderComparison(content, container) {
     color: var(--ink);
   `;
   title.textContent = content.title || 'Comparison';
-  wrap.appendChild(title);
+  container.appendChild(title);
 
-  // Header row
+  const wrap = document.createElement('div');
+  wrap.className = 'comparison-wrap';
+
+  // Header row — DOM only, no innerHTML
   const header = document.createElement('div');
   header.className = 'comparison-header';
-  header.innerHTML = `
-    <div>Dimension</div>
-    <div class="comp-item-a">${items[0] || 'Option A'}</div>
-    <div class="comp-item-b">${items[1] || 'Option B'}</div>
-  `;
+  const dimHead = document.createElement('div');
+  dimHead.textContent = 'Dimension';
+  const itemAHead = document.createElement('div');
+  itemAHead.className = 'comp-item-a';
+  itemAHead.textContent = items[0] || 'Option A';
+  const itemBHead = document.createElement('div');
+  itemBHead.className = 'comp-item-b';
+  itemBHead.textContent = items[1] || 'Option B';
+  header.appendChild(dimHead);
+  header.appendChild(itemAHead);
+  header.appendChild(itemBHead);
   wrap.appendChild(header);
 
   // Dimension rows
@@ -167,30 +174,42 @@ function renderComparison(content, container) {
     const dimCell = document.createElement('div');
     dimCell.className = 'comp-dimension';
     dimCell.textContent = dim.dimension || '';
-
-    const valA = document.createElement('div');
-    valA.className = `comp-value${dim.winner === 0 ? ' winner' : ''}`;
-    valA.innerHTML = `${dim.winner === 0 ? '<span class="winner-mark">✓</span>' : ''} ${dim.values?.[0] || '—'}`;
-
-    const valB = document.createElement('div');
-    valB.className = `comp-value${dim.winner === 1 ? ' winner' : ''}`;
-    valB.innerHTML = `${dim.winner === 1 ? '<span class="winner-mark">✓</span>' : ''} ${dim.values?.[1] || '—'}`;
-
     row.appendChild(dimCell);
-    row.appendChild(valA);
-    row.appendChild(valB);
+
+    // Normalise winner: handle number 0/1, string "0"/"1", or absent (no winner)
+    const winner = (dim.winner === 0 || dim.winner === '0') ? 0
+                 : (dim.winner === 1 || dim.winner === '1') ? 1
+                 : -1;
+
+    [0, 1].forEach(idx => {
+      const cell = document.createElement('div');
+      cell.className = `comp-value${winner === idx ? ' winner' : ''}`;
+      if (winner === idx) {
+        const mark = document.createElement('span');
+        mark.className = 'winner-mark';
+        mark.setAttribute('aria-hidden', 'true');
+        mark.textContent = '✓';
+        cell.appendChild(mark);
+      }
+      cell.appendChild(document.createTextNode(dim.values?.[idx] || '—'));
+      row.appendChild(cell);
+    });
+
     wrap.appendChild(row);
   });
 
-  // Verdict
+  container.appendChild(wrap);
+
+  // Verdict — outside the bordered table so its own border-radius isn't clipped
   if (content.verdict) {
     const verdict = document.createElement('div');
     verdict.className = 'comparison-verdict';
-    verdict.innerHTML = `<strong>Verdict:</strong> ${content.verdict}`;
-    wrap.appendChild(verdict);
+    const label = document.createElement('strong');
+    label.textContent = 'Verdict';
+    verdict.appendChild(label);
+    verdict.appendChild(document.createTextNode(': ' + content.verdict));
+    container.appendChild(verdict);
   }
-
-  container.appendChild(wrap);
 }
 
 // ── STAT CARDS ────────────────────────────────────────────────────────
