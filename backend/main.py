@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
 import numpy as np
 from typing import List, Dict, Optional
 import asyncio
@@ -107,10 +108,32 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID from URL")
 
 
+def _yt_proxy_config():
+    """
+    Build a proxy config for youtube-transcript-api from environment variables.
+    - WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD → Webshare rotating
+      residential proxies (most reliable; retries blocked IPs automatically).
+    - HTTPS_PROXY → any generic HTTP/HTTPS proxy.
+    - Neither set → no proxy (fine locally; will be blocked on Railway/cloud).
+    """
+    ws_user = os.getenv("WEBSHARE_PROXY_USERNAME")
+    ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    if ws_user and ws_pass:
+        return WebshareProxyConfig(
+            proxy_username=ws_user,
+            proxy_password=ws_pass,
+            retries_when_blocked=5,
+        )
+    generic = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+    if generic:
+        return GenericProxyConfig(https_url=generic)
+    return None
+
+
 def get_transcript_snippets(video_id: str) -> List[Dict]:
     """Fetch transcript snippets from YouTube, preserving timestamp metadata."""
     try:
-        ytt = YouTubeTranscriptApi()
+        ytt = YouTubeTranscriptApi(proxy_config=_yt_proxy_config())
         fetched = ytt.fetch(video_id)
         return [
             {"text": chunk.text, "start": chunk.start, "duration": chunk.duration}
