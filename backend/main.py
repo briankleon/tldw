@@ -105,6 +105,19 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID from URL")
 
 
+async def fetch_video_title(video_id: str) -> Optional[str]:
+    """Fetch video title via YouTube oEmbed API (works from any IP, no auth needed)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://www.youtube.com/oembed",
+                params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"},
+            )
+            if resp.status_code == 200:
+                return resp.json().get("title")
+    except Exception as e:
+        print(f"oEmbed title fetch failed: {e}")
+    return None
 
 
 def snippets_to_text(snippets: List[Dict]) -> str:
@@ -521,11 +534,14 @@ Here is the transcript of a YouTube video:
 {_VISUAL_SCHEMA}"""
     else:
         full_text = ""
+        # Fetch the real video title via oEmbed so Gemini knows what the video is about
+        video_title = await fetch_video_title(video_id)
+        title_context = f'\nThe video title is: "{video_title}"\n' if video_title else ""
         prompt = f"""You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
 Watch this YouTube video and analyze its content:
 https://www.youtube.com/watch?v={video_id}
-
+{title_context}
 {_VISUAL_INSTRUCTIONS}
 {_VISUAL_SCHEMA}"""
 
