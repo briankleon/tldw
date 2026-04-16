@@ -562,6 +562,24 @@ async def get_go_deeper(video_id: str):
     return go_deeper_store[video_id]
 
 
+@app.delete("/api/cache/{video_id}")
+async def clear_cache(video_id: str):
+    """Clear cached summary and go-deeper data for a video so it can be re-summarised."""
+    removed = []
+    if video_id in summary_store:
+        del summary_store[video_id]
+        _save_json_cache(SUMMARY_CACHE_FILE, summary_store)
+        removed.append("summary")
+    if video_id in go_deeper_store:
+        del go_deeper_store[video_id]
+        _save_json_cache(GO_DEEPER_CACHE_FILE, go_deeper_store)
+        removed.append("go_deeper")
+    if video_id in rag_store:
+        del rag_store[video_id]
+        removed.append("rag")
+    return {"cleared": removed, "video_id": video_id}
+
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     """Timestamp-aware RAG Q&A endpoint.
