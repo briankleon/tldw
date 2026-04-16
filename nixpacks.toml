@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["python312", "nodejs", "deno"]
+nixPkgs = ["python312", "nodejs"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]

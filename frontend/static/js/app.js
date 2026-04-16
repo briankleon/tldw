@@ -9,95 +9,6 @@ const LEVEL_COLORS = [
   '#7a3aad', '#0a9460', '#8a6a10', '#6a3a0a'
 ];
 
-// ── CLIENT-SIDE TRANSCRIPT FETCHING ──────────────────────────────────
-function extractVideoId(url) {
-  const patterns = [
-    /(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&\/]|$)/,
-    /youtu\.be\/([0-9A-Za-z_-]{11})/,
-    /shorts\/([0-9A-Za-z_-]{11})/,
-  ];
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-async function fetchTranscriptClientSide(videoId) {
-  // Use public Invidious instances which provide transcript API endpoints
-  // These instances handle YouTube IP blocking on their end
-  const INVIDIOUS_INSTANCES = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://invidious.jing.rocks',
-    'https://invidious.privacyredirect.com',
-    'https://iv.nbobox.com',
-  ];
-
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      // Fetch captions list
-      const captionsResp = await fetch(`${instance}/api/v1/captions/${videoId}`, {
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!captionsResp.ok) continue;
-      const captionsData = await captionsResp.json();
-      const captions = captionsData?.captions || [];
-      if (captions.length === 0) continue;
-
-      // Prefer English, fall back to first available
-      const enCap = captions.find(c => c.language_code === 'en') ||
-                    captions.find(c => c.language_code?.startsWith('en')) ||
-                    captions[0];
-
-      if (!enCap?.label) continue;
-
-      // Fetch the actual transcript via Invidious
-      const label = encodeURIComponent(enCap.label);
-      const transcriptResp = await fetch(
-        `${instance}/api/v1/captions/${videoId}?label=${label}`,
-        { signal: AbortSignal.timeout(8000) }
-      );
-      if (!transcriptResp.ok) continue;
-      const xmlText = await transcriptResp.text();
-
-      // Parse XML into snippets
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(xmlText, 'text/xml');
-      const textElements = doc.querySelectorAll('text');
-      if (textElements.length === 0) continue;
-
-      const snippets = [];
-      textElements.forEach(el => {
-        const text = el.textContent
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"')
-          .trim();
-        if (text) {
-          snippets.push({
-            text,
-            start: parseFloat(el.getAttribute('start') || '0'),
-            duration: parseFloat(el.getAttribute('dur') || '0'),
-          });
-        }
-      });
-
-      if (snippets.length > 0) {
-        console.log(`Fetched ${snippets.length} transcript snippets via Invidious (${instance})`);
-        return snippets;
-      }
-    } catch (err) {
-      console.warn(`Invidious instance ${instance} failed:`, err);
-      continue;
-    }
-  }
-
-  console.warn('All Invidious instances failed, falling back to server-side');
-  return null;
-}
 
 // ── INIT ──────────────────────────────────────────────────────────────
 document.getElementById('urlInput').addEventListener('keydown', e => {
@@ -169,28 +80,10 @@ async function handleSubmit() {
   animateLoading();
 
   try {
-    // Try fetching transcript client-side to avoid server IP blocking
-    const videoId = extractVideoId(url);
-    let transcriptSnippets = null;
-    if (videoId) {
-      try {
-        transcriptSnippets = await fetchTranscriptClientSide(videoId);
-      } catch (e) {
-        console.warn('Client-side transcript fetch error:', e);
-      }
-    }
-
-    const payload = { url };
-    if (transcriptSnippets && transcriptSnippets.length > 0) {
-      payload.transcript_snippets = transcriptSnippets;
-    } else {
-      console.log('No client-side transcript — server will attempt fetch');
-    }
-
     const res = await fetch('/api/summarise', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ url })
     });
 
     const data = await res.json();

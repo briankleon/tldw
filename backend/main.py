@@ -9,9 +9,6 @@ import os
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
-import numpy as np
 from typing import List, Dict, Optional
 import asyncio
 import httpx
@@ -31,7 +28,6 @@ app.add_middleware(
 static_path = Path(__file__).parent.parent / "frontend" / "static"
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
-WEBSHARE_PROXY_URL = os.getenv("WEBSHARE_PROXY_URL")  # e.g. http://user:pass@proxy.webshare.io:80
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -109,104 +105,6 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID from URL")
 
 
-def get_transcript_snippets(video_id: str) -> List[Dict]:
-    """Fetch transcript snippets from YouTube, preserving timestamp metadata.
-
-    Tries multiple strategies:
-    1. youtube-transcript-api (works locally, blocked on cloud)
-    2. yt-dlp subtitle extraction (robust, handles most blocking)
-    """
-    # Strategy 1: youtube-transcript-api
-    try:
-        proxy_config = GenericProxyConfig(https_url=WEBSHARE_PROXY_URL) if WEBSHARE_PROXY_URL else None
-        ytt = YouTubeTranscriptApi(proxy_config=proxy_config)
-        fetched = ytt.fetch(video_id)
-        return [
-            {"text": chunk.text, "start": chunk.start, "duration": chunk.duration}
-            for chunk in fetched
-        ]
-    except Exception as e:
-        print(f"youtube-transcript-api failed: {e}")
-
-    # Strategy 2: yt-dlp
-    snippets = _fetch_via_ytdlp(video_id)
-    if snippets:
-        return snippets
-
-    raise HTTPException(
-        status_code=422,
-        detail="No transcript available for this video. It may be private, a music video, or have captions disabled."
-    )
-
-
-def _fetch_via_ytdlp(video_id: str) -> Optional[List[Dict]]:
-    """Fetch transcript via yt-dlp: extract subtitle URL then download directly.
-
-    yt-dlp handles YouTube's anti-bot measures to discover the signed subtitle URL.
-    The actual subtitle download goes to YouTube's CDN, which doesn't block cloud IPs.
-    """
-    from yt_dlp import YoutubeDL
-
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
-        ydl_opts = {
-            'skip_download': True,
-            'writeautomaticsub': True,
-            'writesubtitles': True,
-            'subtitleslangs': ['en'],
-            'subtitlesformat': 'json3',
-            'quiet': True,
-            'no_warnings': True,
-            'ignore_no_formats_error': True,
-            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-        }
-
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        subs = info.get('subtitles', {})
-        auto_subs = info.get('automatic_captions', {})
-        en_subs = subs.get('en', []) or auto_subs.get('en', [])
-
-        json3_url = None
-        for s in en_subs:
-            if s.get('ext') == 'json3':
-                json3_url = s['url']
-                break
-
-        if not json3_url:
-            print(f"yt-dlp: no json3 subtitle URL found for {video_id}")
-            return None
-
-        # Fetch the subtitle JSON from YouTube's CDN (not blocked)
-        resp = httpx.get(json3_url, timeout=15)
-        if resp.status_code != 200:
-            print(f"yt-dlp: subtitle download failed with status {resp.status_code}")
-            return None
-
-        data = resp.json()
-        events = data.get("events", [])
-        snippets = []
-        for ev in events:
-            segs = ev.get("segs", [])
-            text = "".join(s.get("utf8", "") for s in segs).strip()
-            if text and text != "\n":
-                snippets.append({
-                    "text": text,
-                    "start": ev.get("tStartMs", 0) / 1000.0,
-                    "duration": ev.get("dDurationMs", 0) / 1000.0,
-                })
-
-        if snippets:
-            print(f"yt-dlp extracted {len(snippets)} snippets for {video_id}")
-            return snippets
-
-    except Exception as e:
-        print(f"yt-dlp error: {e}")
-
-    return None
-
-
 
 
 def snippets_to_text(snippets: List[Dict]) -> str:
@@ -275,20 +173,13 @@ def simple_text_similarity(text1: str, text2: str) -> float:
 
 
 def retrieve_relevant_chunks(video_id: str, question: str, top_k: int = 3) -> List[Dict]:
-    """Return the top-k most relevant chunks for a question.
-
-    Returns List[Dict] with keys: text, start_seconds.
-    Previously returned List[str] — now carries timestamps to the chat endpoint.
-    """
+    """Return the top-k most relevant chunks for a question."""
     if video_id not in rag_store:
-        raise HTTPException(
-            status_code=404,
-            detail="Video not found in RAG store. Please summarise the video first."
-        )
+        raise HTTPException(status_code=404, detail="Video not found in RAG store.")
     chunks: List[Dict] = rag_store[video_id]["chunks"]
-    similarities = [simple_text_similarity(question, chunk["text"]) for chunk in chunks]
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
-    return [chunks[i] for i in top_indices]
+    scored = [(i, simple_text_similarity(question, c["text"])) for i, c in enumerate(chunks)]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [chunks[i] for i, _ in scored[:top_k]]
 
 
 def build_rag_index(video_id: str, snippets: List[Dict]):
@@ -346,10 +237,50 @@ async def call_gemini_async(prompt: str, max_retries: int = 3) -> str:
                 else:
                     break  # exhausted retries for this model → try next
 
-    raise HTTPException(
-        status_code=429,
-        detail="The AI service is currently rate-limited. Please wait a minute and try again, or check your Gemini API quota at https://ai.dev/rate-limit."
-    )
+    raise HTTPException(status_code=429, detail="AI service rate-limited. Please wait and try again.")
+
+
+# ── Shared prompt pieces ──────────────────────────────────────────────
+_VISUAL_INSTRUCTIONS = """Your job:
+1. Understand what this video is really about
+2. Choose the BEST visual type to represent its core message from these options:
+   - "hierarchy"    → for levels, tiers, rankings, pyramids
+   - "timeline"     → for steps, processes, how-tos, chronological sequences
+   - "graph"        → for connected concepts, frameworks, relationship maps
+   - "comparison"   → for X vs Y, pros/cons, side-by-side analysis
+   - "stat_cards"   → for key facts, numbers, tips, takeaways, listicles
+3. Extract the key content and return it structured for that visual type
+"""
+
+_VISUAL_SCHEMA = """Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
+
+{{
+  "video_title": "inferred title or topic of the video",
+  "tldr": "2-3 sentence summary of what this video is about and its key insight",
+  "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
+  "visual_reason": "one sentence explaining why you chose this visual type",
+  "content": {{ ... }}
+}}
+
+The "content" field depends on visual_type:
+
+For "hierarchy":
+{{ "title": "...", "levels": [ {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}} ] }}
+
+For "timeline":
+{{ "title": "...", "steps": [ {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}} ] }}
+
+For "graph":
+{{ "title": "...", "nodes": [ {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}} ], "edges": [ {{"source": "id1", "target": "id2", "label": "relationship"}} ] }}
+
+For "comparison":
+{{ "title": "...", "items": ["Option A", "Option B"], "dimensions": [ {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}} ], "verdict": "overall recommendation" }}
+
+For "stat_cards":
+{{ "title": "...", "cards": [ {{"icon": "emoji", "stat": "bold headline fact", "detail": "1-2 sentence context"}} ] }}
+
+Be accurate to the video content. Extract real insights, not generic summaries.
+"""
 
 
 # ── Go Deeper helpers ─────────────────────────────────────────────────
@@ -570,205 +501,41 @@ async def summarise(request: SummariseRequest, background_tasks: BackgroundTasks
                 background_tasks.add_task(build_rag_index, video_id, legacy_snippets)
         return {k: v for k, v in cached.items() if not k.startswith("_")}
 
-    # 2. Fetch timestamped transcript snippets — prefer client-provided, fall back to server-side.
+    # 2. Use client-provided transcript or fall back to Gemini direct video analysis.
     snippets = None
-    gemini_direct = False
-
     if request.transcript_snippets and len(request.transcript_snippets) > 0:
-        print(f"Using client-provided transcript ({len(request.transcript_snippets)} snippets)")
         snippets = request.transcript_snippets
-    else:
-        try:
-            snippets = get_transcript_snippets(video_id)
-        except HTTPException:
-            print(f"All transcript strategies failed for {video_id} — using Gemini direct video analysis")
-            gemini_direct = True
 
-    if not gemini_direct:
-        # 2a. Build timestamped RAG index in background.
+    if snippets:
         background_tasks.add_task(build_rag_index, video_id, snippets)
-
-        # 2b. Join to plain text for Gemini, then truncate to ~1500 tokens.
         full_text = snippets_to_text(snippets)
-        MAX_TRANSCRIPT = 6000
-        transcript_for_prompt = (
-            full_text[:MAX_TRANSCRIPT] + "... [truncated]"
-            if len(full_text) > MAX_TRANSCRIPT
-            else full_text
-        )
-
-    # 3. Ask Gemini to analyse content and choose the best visual type.
-    if gemini_direct:
-        # Gemini can process YouTube URLs directly — no transcript needed
-        prompt = f"""
-You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
-
-Watch this YouTube video and analyze its content:
-https://www.youtube.com/watch?v={video_id}
-
-Your job:
-1. Understand what this video is really about
-2. Choose the BEST visual type to represent its core message from these options:
-   - "hierarchy"    → for levels, tiers, rankings, pyramids (e.g. "5 levels of data scientist")
-   - "timeline"     → for steps, processes, how-tos, chronological sequences
-   - "graph"        → for connected concepts, frameworks, relationship maps
-   - "comparison"   → for X vs Y, pros/cons, side-by-side analysis
-   - "stat_cards"   → for key facts, numbers, tips, takeaways, listicles
-
-3. Extract the key content and return it structured for that visual type
-
-Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
-
-{{
-  "video_title": "inferred title or topic of the video",
-  "tldr": "2-3 sentence summary of what this video is about and its key insight",
-  "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
-  "visual_reason": "one sentence explaining why you chose this visual type",
-  "content": {{ ... }}
-}}
-
-The "content" field structure depends on visual_type:
-
-For "hierarchy":
-{{
-  "title": "The X Levels of ...",
-  "levels": [
-    {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}}
-  ]
-}}
-
-For "timeline":
-{{
-  "title": "How to ...",
-  "steps": [
-    {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}}
-  ]
-}}
-
-For "graph":
-{{
-  "title": "The ... Framework",
-  "nodes": [
-    {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}}
-  ],
-  "edges": [
-    {{"source": "id1", "target": "id2", "label": "relationship"}}
-  ]
-}}
-
-For "comparison":
-{{
-  "title": "X vs Y",
-  "items": ["Option A", "Option B"],
-  "dimensions": [
-    {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}}
-  ],
-  "verdict": "overall recommendation or conclusion"
-}}
-
-For "stat_cards":
-{{
-  "title": "Key Takeaways",
-  "cards": [
-    {{"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}}
-  ]
-}}
-
-Be accurate to the video content. Extract real insights, not generic summaries.
-"""
-    else:
-        prompt = f"""
-You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
+        transcript_for_prompt = full_text[:6000] + ("... [truncated]" if len(full_text) > 6000 else "")
+        prompt = f"""You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
 Here is the transcript of a YouTube video:
 ---
 {transcript_for_prompt}
 ---
 
-Your job:
-1. Understand what this video is really about
-2. Choose the BEST visual type to represent its core message from these options:
-   - "hierarchy"    → for levels, tiers, rankings, pyramids (e.g. "5 levels of data scientist")
-   - "timeline"     → for steps, processes, how-tos, chronological sequences
-   - "graph"        → for connected concepts, frameworks, relationship maps
-   - "comparison"   → for X vs Y, pros/cons, side-by-side analysis
-   - "stat_cards"   → for key facts, numbers, tips, takeaways, listicles
+{_VISUAL_INSTRUCTIONS}
+{_VISUAL_SCHEMA}"""
+    else:
+        full_text = ""
+        prompt = f"""You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
-3. Extract the key content and return it structured for that visual type
+Watch this YouTube video and analyze its content:
+https://www.youtube.com/watch?v={video_id}
 
-Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
-
-{{
-  "video_title": "inferred title or topic of the video",
-  "tldr": "2-3 sentence summary of what this video is about and its key insight",
-  "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
-  "visual_reason": "one sentence explaining why you chose this visual type",
-  "content": {{ ... }}
-}}
-
-The "content" field structure depends on visual_type:
-
-For "hierarchy":
-{{
-  "title": "The X Levels of ...",
-  "levels": [
-    {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}}
-  ]
-}}
-
-For "timeline":
-{{
-  "title": "How to ...",
-  "steps": [
-    {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}}
-  ]
-}}
-
-For "graph":
-{{
-  "title": "The ... Framework",
-  "nodes": [
-    {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}}
-  ],
-  "edges": [
-    {{"source": "id1", "target": "id2", "label": "relationship"}}
-  ]
-}}
-
-For "comparison":
-{{
-  "title": "X vs Y",
-  "items": ["Option A", "Option B"],
-  "dimensions": [
-    {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}}
-  ],
-  "verdict": "overall recommendation or conclusion"
-}}
-
-For "stat_cards":
-{{
-  "title": "Key Takeaways",
-  "cards": [
-    {{"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}}
-  ]
-}}
-
-Be accurate to the video content. Extract real insights, not generic summaries.
-"""
+{_VISUAL_INSTRUCTIONS}
+{_VISUAL_SCHEMA}"""
 
     try:
         text = await call_gemini_async(prompt)
         text = clean_json(text)
         data = json.loads(text)
         data["video_id"] = video_id
-
-        # Persist snippets so RAG rebuilds with timestamps after a server restart.
-        if snippets:
-            data["_snippets"] = snippets[:500]
-            data["_transcript"] = full_text[:20000]
-        else:
-            data["_snippets"] = []
-            data["_transcript"] = ""
+        data["_snippets"] = (snippets or [])[:500]
+        data["_transcript"] = full_text[:20000]
 
         summary_store[video_id] = data
         _save_json_cache(SUMMARY_CACHE_FILE, summary_store)
@@ -860,6 +627,4 @@ Answer:"""
 
 if __name__ == "__main__":
     import uvicorn
-    from dotenv import load_dotenv
-    load_dotenv()
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
