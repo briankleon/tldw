@@ -3,15 +3,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import json
 import os
 import re
 from pathlib import Path
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
 import numpy as np
 from typing import List, Dict, Optional
 import asyncio
@@ -32,12 +30,13 @@ app.add_middleware(
 static_path = Path(__file__).parent.parent / "frontend" / "static"
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
+WEBSHARE_PROXY_URL = os.getenv("WEBSHARE_PROXY_URL")  # e.g. http://user:pass@proxy.webshare.io:80
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable not set.")
+    raise ValueError("GEMINI_API_KEY environment variable not set. Copy .env.example to .env and add your key.")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Model fallback chain: lite → 2.0-flash → 2.5-flash-lite
 # All three confirmed available via genai.list_models().
@@ -108,32 +107,20 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID from URL")
 
 
-def _yt_proxy_config():
-    """
-    Build a proxy config for youtube-transcript-api from environment variables.
-    - WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD → Webshare rotating
-      residential proxies (most reliable; retries blocked IPs automatically).
-    - HTTPS_PROXY → any generic HTTP/HTTPS proxy.
-    - Neither set → no proxy (fine locally; will be blocked on Railway/cloud).
-    """
-    ws_user = os.getenv("WEBSHARE_PROXY_USERNAME")
-    ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
-    if ws_user and ws_pass:
-        return WebshareProxyConfig(
-            proxy_username=ws_user,
-            proxy_password=ws_pass,
-            retries_when_blocked=5,
-        )
-    generic = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-    if generic:
-        return GenericProxyConfig(https_url=generic)
-    return None
-
-
 def get_transcript_snippets(video_id: str) -> List[Dict]:
-    """Fetch transcript snippets from YouTube, preserving timestamp metadata."""
+    """Fetch transcript snippets from YouTube, preserving timestamp metadata.
+
+    Returns a list of dicts: [{"text": str, "start": float, "duration": float}, ...]
+    Each snippet is one caption line with its exact start time in seconds.
+    Keeping start/duration here is what makes timestamp-aware RAG possible —
+    previously get_transcript() joined everything into a plain string and
+    threw all of this away.
+    """
     try:
-        ytt = YouTubeTranscriptApi(proxy_config=_yt_proxy_config())
+        ytt_kwargs = {}
+        if WEBSHARE_PROXY_URL:
+            ytt_kwargs["proxies"] = {"https": WEBSHARE_PROXY_URL, "http": WEBSHARE_PROXY_URL}
+        ytt = YouTubeTranscriptApi(**ytt_kwargs)
         fetched = ytt.fetch(video_id)
         return [
             {"text": chunk.text, "start": chunk.start, "duration": chunk.duration}
@@ -246,26 +233,26 @@ def _parse_retry_delay(err: str) -> float:
 
 
 async def call_gemini_async(prompt: str, max_retries: int = 3) -> str:
-    """Call Gemini (text-only) with per-error retry delay and model fallback.
+    """Call Gemini with per-error retry delay and model fallback on quota exhaustion.
 
-    Used by the chat endpoint. Summarisation uses client.models.generate_content
-    directly with a YouTube URL instead.
+    - Parses the actual retry_delay from 429 responses instead of guessing.
+    - Falls back through _MODEL_CHAIN when a model's daily quota is fully used.
+    - Never blocks the event loop (runs in a thread pool).
     """
     for model_name in _MODEL_CHAIN:
+        current_model = genai.GenerativeModel(model_name)
         for attempt in range(max_retries):
             try:
-                response = await asyncio.to_thread(
-                    lambda m=model_name: client.models.generate_content(
-                        model=m, contents=prompt
-                    )
-                )
+                response = await asyncio.to_thread(current_model.generate_content, prompt)
                 return response.text
             except Exception as e:
                 err = str(e)
                 is_rate_limit = '429' in err or 'quota' in err.lower() or 'exhausted' in err.lower()
                 if not is_rate_limit:
-                    raise
+                    raise  # non-quota error — bubble up immediately
 
+                # Broadened daily quota detection to catch RESOURCE_EXHAUSTED and
+                # other Gemini error variants the original narrow check would miss.
                 is_daily_exhausted = (
                     'limit: 0' in err
                     or 'PerDay' in err
@@ -274,14 +261,14 @@ async def call_gemini_async(prompt: str, max_retries: int = 3) -> str:
                 )
                 if is_daily_exhausted:
                     print(f"Gemini daily quota exhausted for {model_name} — trying next model…")
-                    break
+                    break  # break inner loop → advance to next model
 
                 if attempt < max_retries - 1:
                     wait = _parse_retry_delay(err)
                     print(f"Gemini rate limited ({model_name}) — waiting {wait:.0f}s before retry {attempt + 1}/{max_retries}…")
                     await asyncio.sleep(wait)
                 else:
-                    break
+                    break  # exhausted retries for this model → try next
 
     raise HTTPException(
         status_code=429,
@@ -498,25 +485,38 @@ async def summarise(request: SummariseRequest, background_tasks: BackgroundTasks
         cached = summary_store[video_id]
         if video_id not in rag_store:
             if cached.get("_snippets"):
+                # Preferred path: timestamps intact from original fetch.
                 background_tasks.add_task(build_rag_index, video_id, cached["_snippets"])
             elif cached.get("_transcript"):
+                # Legacy cache (pre-timestamp): synthesise a single snippet with
+                # start=0 so the index builds, but timestamps won't be accurate.
                 legacy_snippets = [{"text": cached["_transcript"], "start": 0.0, "duration": 0.0}]
                 background_tasks.add_task(build_rag_index, video_id, legacy_snippets)
         return {k: v for k, v in cached.items() if not k.startswith("_")}
 
-    # 2. Fetch timestamped transcript snippets for RAG storage.
+    # 2. Fetch timestamped transcript snippets — single YouTube API call.
     snippets = get_transcript_snippets(video_id)
+
+    # 2a. Build timestamped RAG index in background.
     background_tasks.add_task(build_rag_index, video_id, snippets)
+
+    # 2b. Join to plain text for Gemini, then truncate to ~1500 tokens.
     full_text = snippets_to_text(snippets)
+    MAX_TRANSCRIPT = 6000
+    transcript_for_prompt = (
+        full_text[:MAX_TRANSCRIPT] + "... [truncated]"
+        if len(full_text) > MAX_TRANSCRIPT
+        else full_text
+    )
 
-    # 3. Build YouTube URL for native Gemini video understanding (no transcript needed in prompt).
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    # 4. Build prompt — Gemini reads the video directly via URL.
-    prompt = """
+    # 3. Ask Gemini to analyse content and choose the best visual type.
+    prompt = f"""
 You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
-Watch this video and understand what it is really about.
+Here is the transcript of a YouTube video:
+---
+{transcript_for_prompt}
+---
 
 Your job:
 1. Understand what this video is really about
@@ -531,91 +531,86 @@ Your job:
 
 Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
 
-{
+{{
   "video_title": "inferred title or topic of the video",
   "tldr": "2-3 sentence summary of what this video is about and its key insight",
   "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
   "visual_reason": "one sentence explaining why you chose this visual type",
-  "content": { ... }
-}
+  "content": {{ ... }}
+}}
 
 The "content" field structure depends on visual_type:
 
 For "hierarchy":
-{
+{{
   "title": "The X Levels of ...",
   "levels": [
-    {"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}
+    {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}}
   ]
-}
+}}
 
 For "timeline":
-{
+{{
   "title": "How to ...",
   "steps": [
-    {"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}
+    {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}}
   ]
-}
+}}
 
 For "graph":
-{
+{{
   "title": "The ... Framework",
   "nodes": [
-    {"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}
+    {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}}
   ],
   "edges": [
-    {"source": "id1", "target": "id2", "label": "relationship"}
+    {{"source": "id1", "target": "id2", "label": "relationship"}}
   ]
-}
+}}
 
 For "comparison":
-{
+{{
   "title": "X vs Y",
   "items": ["Option A", "Option B"],
   "dimensions": [
-    {"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}
+    {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}}
   ],
   "verdict": "overall recommendation or conclusion"
-}
+}}
 
 For "stat_cards":
-{
+{{
   "title": "Key Takeaways",
   "cards": [
-    {"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}
+    {{"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}}
   ]
-}
+}}
 
 Be accurate to the video content. Extract real insights, not generic summaries.
 """
 
-    # 5. Call Gemini with native YouTube URL.
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=types.Content(
-                parts=[
-                    types.Part(file_data=types.FileData(file_uri=youtube_url)),
-                    types.Part(text=prompt)
-                ]
-            )
-        )
-        text = clean_json(response.text)
+        text = await call_gemini_async(prompt)
+        text = clean_json(text)
         data = json.loads(text)
         data["video_id"] = video_id
 
         # Persist snippets so RAG rebuilds with timestamps after a server restart.
-        # Cap to 2000 snippets (~30-40 min of video) to keep file size reasonable.
+        # Cap to 500 snippets (~5-8 min of coverage) to keep the cache file small
+        # and guarantee _snippets never bloats any downstream payload.
         # _-prefixed keys are always stripped before returning to the client.
-        data["_snippets"] = snippets[:2000]
-        data["_transcript"] = full_text[:50000]  # legacy fallback
+        data["_snippets"] = snippets[:500]
+        data["_transcript"] = full_text[:20000]  # legacy fallback
 
         summary_store[video_id] = data
         _save_json_cache(SUMMARY_CACHE_FILE, summary_store)
 
-        background_tasks.add_task(build_go_deeper, video_id, data)
+        # Pass only public (non-_) fields to build_go_deeper so internal data
+        # can never accidentally end up serialised into a Gemini prompt.
+        public_data = {k: v for k, v in data.items() if not k.startswith("_")}
+        background_tasks.add_task(build_go_deeper, video_id, public_data)
 
-        return {k: v for k, v in data.items() if not k.startswith("_")}
+        return public_data
     except HTTPException:
         raise
     except json.JSONDecodeError as e:
