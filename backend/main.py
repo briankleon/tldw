@@ -117,11 +117,11 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
     threw all of this away.
     """
     try:
-        ytt_kwargs = {}
+        ytt = YouTubeTranscriptApi()
+        fetch_kwargs = {}
         if WEBSHARE_PROXY_URL:
-            ytt_kwargs["proxies"] = {"https": WEBSHARE_PROXY_URL, "http": WEBSHARE_PROXY_URL}
-        ytt = YouTubeTranscriptApi(**ytt_kwargs)
-        fetched = ytt.fetch(video_id)
+            fetch_kwargs["proxies"] = {"https": WEBSHARE_PROXY_URL, "http": WEBSHARE_PROXY_URL}
+        fetched = ytt.fetch(video_id, **fetch_kwargs)
         return [
             {"text": chunk.text, "start": chunk.start, "duration": chunk.duration}
             for chunk in fetched
