@@ -9,6 +9,107 @@ const LEVEL_COLORS = [
   '#7a3aad', '#0a9460', '#8a6a10', '#6a3a0a'
 ];
 
+// ── CLIENT-SIDE TRANSCRIPT FETCHING ──────────────────────────────────
+function extractVideoId(url) {
+  const patterns = [
+    /(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&\/]|$)/,
+    /youtu\.be\/([0-9A-Za-z_-]{11})/,
+    /shorts\/([0-9A-Za-z_-]{11})/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+async function fetchTranscriptClientSide(videoId) {
+  // Fetch the YouTube watch page via CORS proxy to find caption tracks
+  const CORS_PROXIES = [
+    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  ];
+
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  for (const proxyFn of CORS_PROXIES) {
+    try {
+      const resp = await fetch(proxyFn(watchUrl));
+      if (!resp.ok) continue;
+      const html = await resp.text();
+
+      // Extract captions JSON from the page
+      const captionMatch = html.match(/"captions":\s*(\{.*?"playerCaptionsTracklistRenderer".*?\})\s*,\s*"/s);
+      if (!captionMatch) continue;
+
+      // Find the tracklist
+      let captionData;
+      try {
+        // The match may include trailing content; parse carefully
+        const jsonStr = captionMatch[1];
+        captionData = JSON.parse(jsonStr);
+      } catch {
+        // Try extracting just the captionTracks array
+        const trackMatch = html.match(/"captionTracks":\s*(\[.*?\])/s);
+        if (!trackMatch) continue;
+        captionData = { playerCaptionsTracklistRenderer: { captionTracks: JSON.parse(trackMatch[1]) } };
+      }
+
+      const tracks = captionData?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (!tracks || tracks.length === 0) continue;
+
+      // Prefer English, fall back to first available
+      const enTrack = tracks.find(t => t.languageCode === 'en') ||
+                      tracks.find(t => t.languageCode?.startsWith('en')) ||
+                      tracks[0];
+
+      if (!enTrack?.baseUrl) continue;
+
+      // Fetch the actual transcript XML
+      const xmlResp = await fetch(proxyFn(enTrack.baseUrl));
+      if (!xmlResp.ok) continue;
+      const xmlText = await xmlResp.text();
+
+      // Parse XML into snippets
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xmlText, 'text/xml');
+      const textElements = doc.querySelectorAll('text');
+
+      if (textElements.length === 0) continue;
+
+      const snippets = [];
+      textElements.forEach(el => {
+        const text = el.textContent
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&#39;/g, "'")
+          .replace(/&quot;/g, '"')
+          .trim();
+        if (text) {
+          snippets.push({
+            text: text,
+            start: parseFloat(el.getAttribute('start') || '0'),
+            duration: parseFloat(el.getAttribute('dur') || '0'),
+          });
+        }
+      });
+
+      if (snippets.length > 0) {
+        console.log(`Fetched ${snippets.length} transcript snippets client-side via CORS proxy`);
+        return snippets;
+      }
+    } catch (err) {
+      console.warn('CORS proxy attempt failed:', err);
+      continue;
+    }
+  }
+
+  // All proxies failed — return null so backend can try server-side
+  console.warn('Client-side transcript fetch failed, falling back to server-side');
+  return null;
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────
 document.getElementById('urlInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') handleSubmit();
@@ -79,10 +180,26 @@ async function handleSubmit() {
   animateLoading();
 
   try {
+    // Try fetching transcript client-side to avoid server IP blocking
+    const videoId = extractVideoId(url);
+    let transcriptSnippets = null;
+    if (videoId) {
+      try {
+        transcriptSnippets = await fetchTranscriptClientSide(videoId);
+      } catch (e) {
+        console.warn('Client-side transcript fetch error:', e);
+      }
+    }
+
+    const payload = { url };
+    if (transcriptSnippets && transcriptSnippets.length > 0) {
+      payload.transcript_snippets = transcriptSnippets;
+    }
+
     const res = await fetch('/api/summarise', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
+      body: JSON.stringify(payload)
     });
 
     const data = await res.json();

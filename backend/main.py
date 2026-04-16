@@ -86,6 +86,7 @@ print(f"Loaded {len(summary_store)} cached summaries and {len(go_deeper_store)} 
 # ── Request/Response Models ───────────────────────────────────────────
 class SummariseRequest(BaseModel):
     url: str
+    transcript_snippets: Optional[List[Dict]] = None
 
 class ChatRequest(BaseModel):
     video_id: str
@@ -493,8 +494,12 @@ async def summarise(request: SummariseRequest, background_tasks: BackgroundTasks
                 background_tasks.add_task(build_rag_index, video_id, legacy_snippets)
         return {k: v for k, v in cached.items() if not k.startswith("_")}
 
-    # 2. Fetch timestamped transcript snippets — single YouTube API call.
-    snippets = get_transcript_snippets(video_id)
+    # 2. Fetch timestamped transcript snippets — prefer client-provided, fall back to server-side.
+    if request.transcript_snippets and len(request.transcript_snippets) > 0:
+        print(f"Using client-provided transcript ({len(request.transcript_snippets)} snippets)")
+        snippets = request.transcript_snippets
+    else:
+        snippets = get_transcript_snippets(video_id)
 
     # 2a. Build timestamped RAG index in background.
     background_tasks.add_task(build_rag_index, video_id, snippets)
