@@ -157,6 +157,8 @@ def _fetch_via_ytdlp(video_id: str) -> Optional[List[Dict]]:
             'subtitlesformat': 'json3',
             'quiet': True,
             'no_warnings': True,
+            'ignore_no_formats_error': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         }
 
         with YoutubeDL(ydl_opts) as ydl:
