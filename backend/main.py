@@ -140,49 +140,65 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
 
 
 def _fetch_via_ytdlp(video_id: str) -> Optional[List[Dict]]:
-    """Fetch transcript via yt-dlp subtitle extraction."""
-    import subprocess
-    import tempfile
+    """Fetch transcript via yt-dlp: extract subtitle URL then download directly.
+
+    yt-dlp handles YouTube's anti-bot measures to discover the signed subtitle URL.
+    The actual subtitle download goes to YouTube's CDN, which doesn't block cloud IPs.
+    """
+    from yt_dlp import YoutubeDL
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "--skip-download",
-                    "--write-auto-sub",
-                    "--write-sub",
-                    "--sub-lang", "en",
-                    "--sub-format", "json3",
-                    "-o", os.path.join(tmpdir, "%(id)s"),
-                    url,
-                ],
-                capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode != 0:
-                print(f"yt-dlp failed: {result.stderr[:200]}")
-                return None
+        ydl_opts = {
+            'skip_download': True,
+            'writeautomaticsub': True,
+            'writesubtitles': True,
+            'subtitleslangs': ['en'],
+            'subtitlesformat': 'json3',
+            'quiet': True,
+            'no_warnings': True,
+        }
 
-            # Find the subtitle file
-            for fname in os.listdir(tmpdir):
-                if fname.endswith(".json3"):
-                    with open(os.path.join(tmpdir, fname)) as fh:
-                        data = json.load(fh)
-                    events = data.get("events", [])
-                    snippets = []
-                    for ev in events:
-                        segs = ev.get("segs", [])
-                        text = "".join(s.get("utf8", "") for s in segs).strip()
-                        if text and text != "\n":
-                            snippets.append({
-                                "text": text,
-                                "start": ev.get("tStartMs", 0) / 1000.0,
-                                "duration": ev.get("dDurationMs", 0) / 1000.0,
-                            })
-                    if snippets:
-                        print(f"yt-dlp extracted {len(snippets)} snippets for {video_id}")
-                        return snippets
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        subs = info.get('subtitles', {})
+        auto_subs = info.get('automatic_captions', {})
+        en_subs = subs.get('en', []) or auto_subs.get('en', [])
+
+        json3_url = None
+        for s in en_subs:
+            if s.get('ext') == 'json3':
+                json3_url = s['url']
+                break
+
+        if not json3_url:
+            print(f"yt-dlp: no json3 subtitle URL found for {video_id}")
+            return None
+
+        # Fetch the subtitle JSON from YouTube's CDN (not blocked)
+        resp = httpx.get(json3_url, timeout=15)
+        if resp.status_code != 200:
+            print(f"yt-dlp: subtitle download failed with status {resp.status_code}")
+            return None
+
+        data = resp.json()
+        events = data.get("events", [])
+        snippets = []
+        for ev in events:
+            segs = ev.get("segs", [])
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if text and text != "\n":
+                snippets.append({
+                    "text": text,
+                    "start": ev.get("tStartMs", 0) / 1000.0,
+                    "duration": ev.get("dDurationMs", 0) / 1000.0,
+                })
+
+        if snippets:
+            print(f"yt-dlp extracted {len(snippets)} snippets for {video_id}")
+            return snippets
+
     except Exception as e:
         print(f"yt-dlp error: {e}")
 
