@@ -114,7 +114,7 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
 
     Tries multiple strategies:
     1. youtube-transcript-api (works locally, blocked on cloud)
-    2. Invidious API instances (public, handle YouTube blocking)
+    2. yt-dlp subtitle extraction (robust, handles most blocking)
     """
     # Strategy 1: youtube-transcript-api
     try:
@@ -128,8 +128,8 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
     except Exception as e:
         print(f"youtube-transcript-api failed: {e}")
 
-    # Strategy 2: Invidious API
-    snippets = _fetch_via_invidious(video_id)
+    # Strategy 2: yt-dlp
+    snippets = _fetch_via_ytdlp(video_id)
     if snippets:
         return snippets
 
@@ -139,75 +139,56 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
     )
 
 
-def _fetch_via_invidious(video_id: str) -> Optional[List[Dict]]:
-    """Fetch transcript via public Invidious instances."""
-    import xml.etree.ElementTree as ET
+def _fetch_via_ytdlp(video_id: str) -> Optional[List[Dict]]:
+    """Fetch transcript via yt-dlp subtitle extraction."""
+    import subprocess
+    import tempfile
 
-    instances = [
-        'https://inv.nadeko.net',
-        'https://invidious.nerdvpn.de',
-        'https://invidious.jing.rocks',
-        'https://invidious.privacyredirect.com',
-        'https://iv.nbobox.com',
-        'https://inv.tux.pizza',
-        'https://invidious.protokolla.fi',
-    ]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-auto-sub",
+                    "--write-sub",
+                    "--sub-lang", "en",
+                    "--sub-format", "json3",
+                    "-o", os.path.join(tmpdir, "%(id)s"),
+                    url,
+                ],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                print(f"yt-dlp failed: {result.stderr[:200]}")
+                return None
 
-    for instance in instances:
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                # Get caption list
-                resp = client.get(f"{instance}/api/v1/captions/{video_id}")
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                captions = data.get("captions", [])
-                if not captions:
-                    continue
-
-                # Prefer English
-                cap = next((c for c in captions if c.get("language_code") == "en"), None)
-                if not cap:
-                    cap = next((c for c in captions if c.get("language_code", "").startswith("en")), None)
-                if not cap:
-                    cap = captions[0]
-
-                label = cap.get("label", "")
-                if not label:
-                    continue
-
-                # Fetch transcript XML
-                xml_resp = client.get(
-                    f"{instance}/api/v1/captions/{video_id}",
-                    params={"label": label}
-                )
-                if xml_resp.status_code != 200:
-                    continue
-
-                # Parse XML
-                root = ET.fromstring(xml_resp.text)
-                snippets = []
-                for el in root.iter("text"):
-                    text = (el.text or "").strip()
-                    if text:
-                        # Decode HTML entities
-                        import html
-                        text = html.unescape(text)
-                        snippets.append({
-                            "text": text,
-                            "start": float(el.get("start", 0)),
-                            "duration": float(el.get("dur", 0)),
-                        })
-
-                if snippets:
-                    print(f"Fetched {len(snippets)} snippets via Invidious ({instance})")
-                    return snippets
-
-        except Exception as e:
-            print(f"Invidious {instance} failed: {e}")
-            continue
+            # Find the subtitle file
+            for fname in os.listdir(tmpdir):
+                if fname.endswith(".json3"):
+                    with open(os.path.join(tmpdir, fname)) as fh:
+                        data = json.load(fh)
+                    events = data.get("events", [])
+                    snippets = []
+                    for ev in events:
+                        segs = ev.get("segs", [])
+                        text = "".join(s.get("utf8", "") for s in segs).strip()
+                        if text and text != "\n":
+                            snippets.append({
+                                "text": text,
+                                "start": ev.get("tStartMs", 0) / 1000.0,
+                                "duration": ev.get("dDurationMs", 0) / 1000.0,
+                            })
+                    if snippets:
+                        print(f"yt-dlp extracted {len(snippets)} snippets for {video_id}")
+                        return snippets
+    except Exception as e:
+        print(f"yt-dlp error: {e}")
 
     return None
+
+
 
 
 def snippets_to_text(snippets: List[Dict]) -> str:
