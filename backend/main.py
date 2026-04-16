@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 import numpy as np
 from typing import List, Dict, Optional
 import asyncio
@@ -117,11 +118,9 @@ def get_transcript_snippets(video_id: str) -> List[Dict]:
     threw all of this away.
     """
     try:
-        ytt = YouTubeTranscriptApi()
-        fetch_kwargs = {}
-        if WEBSHARE_PROXY_URL:
-            fetch_kwargs["proxies"] = {"https": WEBSHARE_PROXY_URL, "http": WEBSHARE_PROXY_URL}
-        fetched = ytt.fetch(video_id, **fetch_kwargs)
+        proxy_config = GenericProxyConfig(https_url=WEBSHARE_PROXY_URL) if WEBSHARE_PROXY_URL else None
+        ytt = YouTubeTranscriptApi(proxy_config=proxy_config)
+        fetched = ytt.fetch(video_id)
         return [
             {"text": chunk.text, "start": chunk.start, "duration": chunk.duration}
             for chunk in fetched
