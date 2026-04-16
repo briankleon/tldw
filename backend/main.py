@@ -571,26 +571,113 @@ async def summarise(request: SummariseRequest, background_tasks: BackgroundTasks
         return {k: v for k, v in cached.items() if not k.startswith("_")}
 
     # 2. Fetch timestamped transcript snippets — prefer client-provided, fall back to server-side.
+    snippets = None
+    gemini_direct = False
+
     if request.transcript_snippets and len(request.transcript_snippets) > 0:
         print(f"Using client-provided transcript ({len(request.transcript_snippets)} snippets)")
         snippets = request.transcript_snippets
     else:
-        snippets = get_transcript_snippets(video_id)
+        try:
+            snippets = get_transcript_snippets(video_id)
+        except HTTPException:
+            print(f"All transcript strategies failed for {video_id} — using Gemini direct video analysis")
+            gemini_direct = True
 
-    # 2a. Build timestamped RAG index in background.
-    background_tasks.add_task(build_rag_index, video_id, snippets)
+    if not gemini_direct:
+        # 2a. Build timestamped RAG index in background.
+        background_tasks.add_task(build_rag_index, video_id, snippets)
 
-    # 2b. Join to plain text for Gemini, then truncate to ~1500 tokens.
-    full_text = snippets_to_text(snippets)
-    MAX_TRANSCRIPT = 6000
-    transcript_for_prompt = (
-        full_text[:MAX_TRANSCRIPT] + "... [truncated]"
-        if len(full_text) > MAX_TRANSCRIPT
-        else full_text
-    )
+        # 2b. Join to plain text for Gemini, then truncate to ~1500 tokens.
+        full_text = snippets_to_text(snippets)
+        MAX_TRANSCRIPT = 6000
+        transcript_for_prompt = (
+            full_text[:MAX_TRANSCRIPT] + "... [truncated]"
+            if len(full_text) > MAX_TRANSCRIPT
+            else full_text
+        )
 
     # 3. Ask Gemini to analyse content and choose the best visual type.
-    prompt = f"""
+    if gemini_direct:
+        # Gemini can process YouTube URLs directly — no transcript needed
+        prompt = f"""
+You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
+
+Watch this YouTube video and analyze its content:
+https://www.youtube.com/watch?v={video_id}
+
+Your job:
+1. Understand what this video is really about
+2. Choose the BEST visual type to represent its core message from these options:
+   - "hierarchy"    → for levels, tiers, rankings, pyramids (e.g. "5 levels of data scientist")
+   - "timeline"     → for steps, processes, how-tos, chronological sequences
+   - "graph"        → for connected concepts, frameworks, relationship maps
+   - "comparison"   → for X vs Y, pros/cons, side-by-side analysis
+   - "stat_cards"   → for key facts, numbers, tips, takeaways, listicles
+
+3. Extract the key content and return it structured for that visual type
+
+Return ONLY valid JSON (no markdown fences, no explanation) matching this structure:
+
+{{
+  "video_title": "inferred title or topic of the video",
+  "tldr": "2-3 sentence summary of what this video is about and its key insight",
+  "visual_type": "hierarchy|timeline|graph|comparison|stat_cards",
+  "visual_reason": "one sentence explaining why you chose this visual type",
+  "content": {{ ... }}
+}}
+
+The "content" field structure depends on visual_type:
+
+For "hierarchy":
+{{
+  "title": "The X Levels of ...",
+  "levels": [
+    {{"level": 1, "name": "Level name", "description": "what defines this level", "traits": ["trait1", "trait2"]}}
+  ]
+}}
+
+For "timeline":
+{{
+  "title": "How to ...",
+  "steps": [
+    {{"step": 1, "title": "Step title", "description": "what happens here", "tip": "optional pro tip"}}
+  ]
+}}
+
+For "graph":
+{{
+  "title": "The ... Framework",
+  "nodes": [
+    {{"id": "snake_case_id", "label": "Concept", "description": "brief description", "group": "category"}}
+  ],
+  "edges": [
+    {{"source": "id1", "target": "id2", "label": "relationship"}}
+  ]
+}}
+
+For "comparison":
+{{
+  "title": "X vs Y",
+  "items": ["Option A", "Option B"],
+  "dimensions": [
+    {{"dimension": "Dimension name", "values": ["value for A", "value for B"], "winner": 0}}
+  ],
+  "verdict": "overall recommendation or conclusion"
+}}
+
+For "stat_cards":
+{{
+  "title": "Key Takeaways",
+  "cards": [
+    {{"icon": "emoji", "stat": "bold headline fact or number", "detail": "1-2 sentence context"}}
+  ]
+}}
+
+Be accurate to the video content. Extract real insights, not generic summaries.
+"""
+    else:
+        prompt = f"""
 You are an expert at distilling YouTube video content into clear, beautiful visual summaries.
 
 Here is the transcript of a YouTube video:
@@ -676,11 +763,12 @@ Be accurate to the video content. Extract real insights, not generic summaries.
         data["video_id"] = video_id
 
         # Persist snippets so RAG rebuilds with timestamps after a server restart.
-        # Cap to 500 snippets (~5-8 min of coverage) to keep the cache file small
-        # and guarantee _snippets never bloats any downstream payload.
-        # _-prefixed keys are always stripped before returning to the client.
-        data["_snippets"] = snippets[:500]
-        data["_transcript"] = full_text[:20000]  # legacy fallback
+        if snippets:
+            data["_snippets"] = snippets[:500]
+            data["_transcript"] = full_text[:20000]
+        else:
+            data["_snippets"] = []
+            data["_transcript"] = ""
 
         summary_store[video_id] = data
         _save_json_cache(SUMMARY_CACHE_FILE, summary_store)
